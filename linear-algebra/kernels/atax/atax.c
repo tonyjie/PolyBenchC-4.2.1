@@ -13,6 +13,8 @@
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
+#include <mkl.h>
 
 /* Include polybench common header. */
 #include <polybench.h>
@@ -85,6 +87,138 @@ void kernel_atax(int m, int n,
 
 }
 
+/* Intel MKL optimized ATAX kernel using GEMV routines */
+static
+void kernel_atax_mkl(int m, int n,
+                   DATA_TYPE POLYBENCH_2D(A,M,N,m,n),
+                   DATA_TYPE POLYBENCH_1D(x,N,n),
+                   DATA_TYPE POLYBENCH_1D(y,N,n),
+                   DATA_TYPE POLYBENCH_1D(tmp,M,m))
+{
+#ifdef DATA_TYPE_IS_DOUBLE
+  const double alpha = 1.0;
+  const double beta = 0.0;
+  
+  /* Initialize y to zero */
+  for (int i = 0; i < n; i++)
+    y[i] = 0.0;
+    
+  /* tmp = A * x (matrix-vector multiply) */
+  cblas_dgemv(CblasRowMajor,    /* Matrix layout: Row-major */
+              CblasNoTrans,      /* No transpose of matrix A */
+              m, n,              /* Matrix dimensions */
+              alpha,             /* Alpha scalar */
+              &A[0][0], n,       /* Matrix A and leading dimension */
+              x, 1,              /* Vector x and stride */
+              beta,              /* Beta scalar */
+              tmp, 1);           /* Result vector tmp and stride */
+              
+  /* For each row i, compute y += A[i,*]' * tmp[i] */
+  for (int i = 0; i < m; i++) {
+    /* y += A[i,:] * tmp[i] (scale row i of A by tmp[i] and add to y) */
+    cblas_daxpy(n,               /* Vector length */
+                tmp[i],          /* Scalar alpha (tmp[i]) */
+                &A[i][0], 1,     /* Row i of A and stride */
+                y, 1);           /* Vector y and stride */
+  }
+  
+#elif defined(DATA_TYPE_IS_FLOAT)
+  const float alpha = 1.0f;
+  const float beta = 0.0f;
+  
+  /* Initialize y to zero */
+  for (int i = 0; i < n; i++)
+    y[i] = 0.0f;
+    
+  /* tmp = A * x (matrix-vector multiply) */
+  cblas_sgemv(CblasRowMajor,    /* Matrix layout: Row-major */
+              CblasNoTrans,      /* No transpose of matrix A */
+              m, n,              /* Matrix dimensions */
+              alpha,             /* Alpha scalar */
+              &A[0][0], n,       /* Matrix A and leading dimension */
+              x, 1,              /* Vector x and stride */
+              beta,              /* Beta scalar */
+              tmp, 1);           /* Result vector tmp and stride */
+              
+  /* For each row i, compute y += A[i,*]' * tmp[i] */
+  for (int i = 0; i < m; i++) {
+    /* y += A[i,:] * tmp[i] (scale row i of A by tmp[i] and add to y) */
+    cblas_saxpy(n,               /* Vector length */
+                tmp[i],          /* Scalar alpha (tmp[i]) */
+                &A[i][0], 1,     /* Row i of A and stride */
+                y, 1);           /* Vector y and stride */
+  }
+#else
+  /* For integer types, we fall back to the naive implementation */
+  kernel_atax(m, n, A, x, y, tmp);
+#endif
+}
+
+/* Function to verify the correctness of the MKL implementation */
+static
+int verify_results(int n,
+                 DATA_TYPE POLYBENCH_1D(y_naive,N,n),
+                 DATA_TYPE POLYBENCH_1D(y_mkl,N,n))
+{
+    int i;
+    DATA_TYPE diff;
+    DATA_TYPE max_diff = 0.0;
+    DATA_TYPE threshold = 1e-4;
+    
+    for (i = 0; i < n; i++) {
+        diff = fabs(y_naive[i] - y_mkl[i]);
+        if (diff > max_diff) {
+            max_diff = diff;
+        }
+    }
+    
+    printf("Maximum difference between naive and MKL implementation: %e\n", max_diff);
+    
+    if (max_diff < threshold) {
+        printf("Verification PASSED: Results match within threshold\n");
+        return 1; /* Success */
+    } else {
+        printf("Verification FAILED: Results differ beyond threshold\n");
+        return 0; /* Failure */
+    }
+}
+
+/* Timer function - uses high resolution timer if available */
+double get_time() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+/* Function to time the execution of a kernel */
+static
+double time_kernel(void (*kernel)(int, int, 
+                                 DATA_TYPE POLYBENCH_2D(A,M,N,m,n),
+                                 DATA_TYPE POLYBENCH_1D(x,N,n),
+                                 DATA_TYPE POLYBENCH_1D(y,N,n),
+                                 DATA_TYPE POLYBENCH_1D(tmp,M,m)),
+                  int m, int n,
+                  DATA_TYPE POLYBENCH_2D(A,M,N,m,n),
+                  DATA_TYPE POLYBENCH_1D(x,N,n),
+                  DATA_TYPE POLYBENCH_1D(y,N,n),
+                  DATA_TYPE POLYBENCH_1D(tmp,M,m))
+{
+    double start_time, end_time;
+    
+    /* Flush cache before timing */
+    polybench_flush_cache();
+    
+    /* Start timer */
+    start_time = get_time();
+    
+    /* Run kernel */
+    kernel(m, n, A, x, y, tmp);
+    
+    /* End timer */
+    end_time = get_time();
+    
+    return end_time - start_time;
+}
 
 int main(int argc, char** argv)
 {
@@ -97,23 +231,35 @@ int main(int argc, char** argv)
   POLYBENCH_1D_ARRAY_DECL(x, DATA_TYPE, N, n);
   POLYBENCH_1D_ARRAY_DECL(y, DATA_TYPE, N, n);
   POLYBENCH_1D_ARRAY_DECL(tmp, DATA_TYPE, M, m);
+  
+  /* For MKL implementation */
+  POLYBENCH_1D_ARRAY_DECL(y_mkl, DATA_TYPE, N, n);
+  POLYBENCH_1D_ARRAY_DECL(tmp_mkl, DATA_TYPE, M, m);
 
   /* Initialize array(s). */
   init_array (m, n, POLYBENCH_ARRAY(A), POLYBENCH_ARRAY(x));
 
-  /* Start timer. */
-  polybench_start_instruments;
+  /* Time naive implementation */
+  double naive_time = time_kernel(kernel_atax, m, n,
+                                POLYBENCH_ARRAY(A),
+                                POLYBENCH_ARRAY(x),
+                                POLYBENCH_ARRAY(y),
+                                POLYBENCH_ARRAY(tmp));
+  
+  printf("Naive ATAX Time: %0.6f seconds\n", naive_time);
 
-  /* Run kernel. */
-  kernel_atax (m, n,
-	       POLYBENCH_ARRAY(A),
-	       POLYBENCH_ARRAY(x),
-	       POLYBENCH_ARRAY(y),
-	       POLYBENCH_ARRAY(tmp));
+  /* Time MKL implementation */
+  double mkl_time = time_kernel(kernel_atax_mkl, m, n,
+                              POLYBENCH_ARRAY(A),
+                              POLYBENCH_ARRAY(x),
+                              POLYBENCH_ARRAY(y_mkl),
+                              POLYBENCH_ARRAY(tmp_mkl));
+  
+  printf("MKL ATAX Time: %0.6f seconds\n", mkl_time);
+  printf("Speedup: %0.2f\n", naive_time / mkl_time);
 
-  /* Stop and print timer. */
-  polybench_stop_instruments;
-  polybench_print_instruments;
+  /* Verify the correctness of MKL implementation */
+  verify_results(n, POLYBENCH_ARRAY(y), POLYBENCH_ARRAY(y_mkl));
 
   /* Prevent dead-code elimination. All live-out data must be printed
      by the function call in argument. */
@@ -123,7 +269,9 @@ int main(int argc, char** argv)
   POLYBENCH_FREE_ARRAY(A);
   POLYBENCH_FREE_ARRAY(x);
   POLYBENCH_FREE_ARRAY(y);
+  POLYBENCH_FREE_ARRAY(y_mkl);
   POLYBENCH_FREE_ARRAY(tmp);
+  POLYBENCH_FREE_ARRAY(tmp_mkl);
 
   return 0;
 }

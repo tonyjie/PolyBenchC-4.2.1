@@ -13,6 +13,8 @@
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
+#include <mkl.h>
 
 /* Include polybench common header. */
 #include <polybench.h>
@@ -27,7 +29,11 @@ void init_array (int n,
 		 DATA_TYPE POLYBENCH_2D(A,N,N,n,n),
 		 DATA_TYPE POLYBENCH_1D(b,N,n),
 		 DATA_TYPE POLYBENCH_1D(x,N,n),
-		 DATA_TYPE POLYBENCH_1D(y,N,n))
+		 DATA_TYPE POLYBENCH_1D(y,N,n),
+		 DATA_TYPE POLYBENCH_2D(A_mkl,N,N,n,n),
+		 DATA_TYPE POLYBENCH_1D(b_mkl,N,n),
+		 DATA_TYPE POLYBENCH_1D(x_mkl,N,n),
+		 DATA_TYPE POLYBENCH_1D(y_mkl,N,n))
 {
   int i, j;
   DATA_TYPE fn = (DATA_TYPE)n;
@@ -36,7 +42,10 @@ void init_array (int n,
     {
       x[i] = 0;
       y[i] = 0;
+      x_mkl[i] = 0;
+      y_mkl[i] = 0;
       b[i] = (i+1)/fn/2.0 + 4;
+      b_mkl[i] = b[i];
     }
 
   for (i = 0; i < n; i++)
@@ -64,7 +73,11 @@ void init_array (int n,
       for (s = 0; s < n; ++s)
 	A[r][s] = (POLYBENCH_ARRAY(B))[r][s];
   POLYBENCH_FREE_ARRAY(B);
-
+  
+  /* Copy A to A_mkl */
+  for (i = 0; i < n; i++)
+    for (j = 0; j < n; j++)
+      A_mkl[i][j] = A[i][j];
 }
 
 
@@ -136,6 +149,112 @@ void kernel_ludcmp(int n,
 
 }
 
+/* Intel MKL optimized implementation */
+static
+void kernel_ludcmp_mkl(int n,
+                      DATA_TYPE POLYBENCH_2D(A,N,N,n,n),
+                      DATA_TYPE POLYBENCH_1D(b,N,n),
+                      DATA_TYPE POLYBENCH_1D(x,N,n),
+                      DATA_TYPE POLYBENCH_1D(y,N,n))
+{
+    int i, info;
+    int* ipiv = (int*)malloc(n * sizeof(int));
+    
+    /* Copy b to x as we will use x as both input and output vector for MKL */
+    for (i = 0; i < n; i++)
+        x[i] = b[i];
+
+#ifdef DATA_TYPE_IS_DOUBLE
+    /* LU factorization */
+    info = LAPACKE_dgetrf(LAPACK_ROW_MAJOR, n, n, &A[0][0], n, ipiv);
+    
+    /* Solve the system A*x = b */
+    if (info == 0) {
+        info = LAPACKE_dgetrs(LAPACK_ROW_MAJOR, 'N', n, 1, &A[0][0], n, ipiv, x, 1);
+    }
+#elif defined(DATA_TYPE_IS_FLOAT)
+    /* LU factorization */
+    info = LAPACKE_sgetrf(LAPACK_ROW_MAJOR, n, n, &A[0][0], n, ipiv);
+    
+    /* Solve the system A*x = b */
+    if (info == 0) {
+        info = LAPACKE_sgetrs(LAPACK_ROW_MAJOR, 'N', n, 1, &A[0][0], n, ipiv, x, 1);
+    }
+#else
+    /* Fall back to naive implementation for integer types */
+    kernel_ludcmp(n, A, b, x, y);
+#endif
+
+    free(ipiv);
+    
+    /* Note: We don't compute y separately in the MKL version as the solve routine directly gives us x */
+}
+
+/* Function to verify the correctness of the MKL implementation */
+static
+int verify_results(int n,
+                 DATA_TYPE POLYBENCH_1D(x_naive,N,n),
+                 DATA_TYPE POLYBENCH_1D(x_mkl,N,n))
+{
+    int i;
+    DATA_TYPE diff;
+    DATA_TYPE max_diff = 0.0;
+    DATA_TYPE threshold = 1e-4;
+    
+    for (i = 0; i < n; i++) {
+        diff = fabs(x_naive[i] - x_mkl[i]);
+        if (diff > max_diff) {
+            max_diff = diff;
+        }
+    }
+    
+    printf("Maximum difference between naive and MKL implementation: %e\n", max_diff);
+    
+    if (max_diff < threshold) {
+        printf("Verification PASSED: Results match within threshold\n");
+        return 1; /* Success */
+    } else {
+        printf("Verification FAILED: Results differ beyond threshold\n");
+        return 0; /* Failure */
+    }
+}
+
+/* Timer function - uses high resolution timer if available */
+double get_time() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+/* Function to time the execution of a kernel */
+static
+double time_kernel(void (*kernel)(int, 
+                                 DATA_TYPE POLYBENCH_2D(A,N,N,n,n),
+                                 DATA_TYPE POLYBENCH_1D(b,N,n),
+                                 DATA_TYPE POLYBENCH_1D(x,N,n),
+                                 DATA_TYPE POLYBENCH_1D(y,N,n)),
+                  int n,
+                  DATA_TYPE POLYBENCH_2D(A,N,N,n,n),
+                  DATA_TYPE POLYBENCH_1D(b,N,n),
+                  DATA_TYPE POLYBENCH_1D(x,N,n),
+                  DATA_TYPE POLYBENCH_1D(y,N,n))
+{
+    double start_time, end_time;
+    
+    /* Flush cache before timing */
+    polybench_flush_cache();
+    
+    /* Start timer */
+    start_time = get_time();
+    
+    /* Run kernel */
+    kernel(n, A, b, x, y);
+    
+    /* End timer */
+    end_time = get_time();
+    
+    return end_time - start_time;
+}
 
 int main(int argc, char** argv)
 {
@@ -147,28 +266,45 @@ int main(int argc, char** argv)
   POLYBENCH_1D_ARRAY_DECL(b, DATA_TYPE, N, n);
   POLYBENCH_1D_ARRAY_DECL(x, DATA_TYPE, N, n);
   POLYBENCH_1D_ARRAY_DECL(y, DATA_TYPE, N, n);
-
+  
+  /* Variables for MKL implementation */
+  POLYBENCH_2D_ARRAY_DECL(A_mkl, DATA_TYPE, N, N, n, n);
+  POLYBENCH_1D_ARRAY_DECL(b_mkl, DATA_TYPE, N, n);
+  POLYBENCH_1D_ARRAY_DECL(x_mkl, DATA_TYPE, N, n);
+  POLYBENCH_1D_ARRAY_DECL(y_mkl, DATA_TYPE, N, n);
 
   /* Initialize array(s). */
   init_array (n,
 	      POLYBENCH_ARRAY(A),
 	      POLYBENCH_ARRAY(b),
 	      POLYBENCH_ARRAY(x),
-	      POLYBENCH_ARRAY(y));
+	      POLYBENCH_ARRAY(y),
+              POLYBENCH_ARRAY(A_mkl),
+              POLYBENCH_ARRAY(b_mkl),
+              POLYBENCH_ARRAY(x_mkl),
+              POLYBENCH_ARRAY(y_mkl));
 
-  /* Start timer. */
-  polybench_start_instruments;
+  /* Start timer for naive implementation. */
+  double naive_time = time_kernel(kernel_ludcmp, n,
+                                POLYBENCH_ARRAY(A),
+                                POLYBENCH_ARRAY(b),
+                                POLYBENCH_ARRAY(x),
+                                POLYBENCH_ARRAY(y));
+  
+  printf("Naive LUDCMP Time: %0.6f seconds\n", naive_time);
 
-  /* Run kernel. */
-  kernel_ludcmp (n,
-		 POLYBENCH_ARRAY(A),
-		 POLYBENCH_ARRAY(b),
-		 POLYBENCH_ARRAY(x),
-		 POLYBENCH_ARRAY(y));
+  /* Time MKL implementation */
+  double mkl_time = time_kernel(kernel_ludcmp_mkl, n,
+                              POLYBENCH_ARRAY(A_mkl),
+                              POLYBENCH_ARRAY(b_mkl),
+                              POLYBENCH_ARRAY(x_mkl),
+                              POLYBENCH_ARRAY(y_mkl));
+  
+  printf("MKL LUDCMP Time: %0.6f seconds\n", mkl_time);
+  printf("Speedup: %0.2f\n", naive_time / mkl_time);
 
-  /* Stop and print timer. */
-  polybench_stop_instruments;
-  polybench_print_instruments;
+  /* Verify the correctness of MKL implementation */
+  verify_results(n, POLYBENCH_ARRAY(x), POLYBENCH_ARRAY(x_mkl));
 
   /* Prevent dead-code elimination. All live-out data must be printed
      by the function call in argument. */
@@ -176,9 +312,13 @@ int main(int argc, char** argv)
 
   /* Be clean. */
   POLYBENCH_FREE_ARRAY(A);
+  POLYBENCH_FREE_ARRAY(A_mkl);
   POLYBENCH_FREE_ARRAY(b);
+  POLYBENCH_FREE_ARRAY(b_mkl);
   POLYBENCH_FREE_ARRAY(x);
+  POLYBENCH_FREE_ARRAY(x_mkl);
   POLYBENCH_FREE_ARRAY(y);
+  POLYBENCH_FREE_ARRAY(y_mkl);
 
   return 0;
 }
