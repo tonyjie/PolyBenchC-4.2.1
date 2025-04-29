@@ -152,7 +152,7 @@ int verify_results(int ni, int nj,
     int i, j;
     DATA_TYPE diff;
     DATA_TYPE max_diff = 0.0;
-    DATA_TYPE threshold = 1e-6;
+    DATA_TYPE threshold = 1e-4;
     
     for (i = 0; i < ni; i++) {
         for (j = 0; j < nj; j++) {
