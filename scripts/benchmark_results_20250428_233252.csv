@@ -1,8 +1,0 @@
-benchmark,directory,timestamp,compile_success,run_success,verification,speedup
-adi,stencils/adi,2025-04-28 23:32:52,True,True,PASSED,0.9
-fdtd-2d,stencils/fdtd-2d,2025-04-28 23:33:15,True,False,UNKNOWN,0.0
-heat-3d,stencils/heat-3d,2025-04-28 23:33:17,True,True,PASSED,1.01
-jacobi-1d,stencils/jacobi-1d,2025-04-28 23:33:22,True,True,PASSED,1.03
-jacobi-2d,stencils/jacobi-2d,2025-04-28 23:33:23,True,True,PASSED,1.02
-seidel-2d,stencils/seidel-2d,2025-04-28 23:33:26,True,True,PASSED,0.99
-gemm,linear-algebra/blas/gemm,2025-04-28 23:34:08,True,True,PASSED,14.05

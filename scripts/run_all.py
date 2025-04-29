@@ -7,6 +7,7 @@ import re
 import csv
 import sys
 from datetime import datetime
+import matplotlib.pyplot as plt  # Add matplotlib for plotting
 
 # Regex patterns to extract information from output
 SPEEDUP_PATTERN = r'Speedup: (\d+\.\d+)'
@@ -15,8 +16,8 @@ VERIFICATION_PATTERN = r'Verification (PASSED|FAILED)'
 # Define benchmarks and their directories
 BENCHMARKS = {
     # datamining benchmarks
-    # "correlation": "datamining/correlation",
-    # "covariance": "datamining/covariance",
+    "correlation": "datamining/correlation",
+    "covariance": "datamining/covariance",
     # linear-algebra/blas benchmarks
     "gemm": "linear-algebra/blas/gemm",
     "gemver": "linear-algebra/blas/gemver",
@@ -229,7 +230,7 @@ if __name__ == "__main__":
     # Save detailed results to logs directory
     logs_dir = os.path.join(results_dir, f"logs_{timestamp}")
     save_detailed_results(results, logs_dir)
-    
+        
     # Print summary
     print("\nBenchmark Summary:")
     print(f"{'Benchmark':<15} {'Compile':<10} {'Run':<10} {'Verification':<15} {'Speedup':<10}")
