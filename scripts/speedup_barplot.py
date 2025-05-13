@@ -2,6 +2,7 @@
 import argparse
 import os
 import csv
+import json
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -24,14 +25,28 @@ def create_speedup_barplot(csv_file, output_dir=None):
         for row in reader:
             results.append(row)
     
+    # Load MKL function usage data
+    mkl_usage_file = os.path.join(output_dir, "mkl_function_usage.json")
+    mkl_usage_data = {}
+    if os.path.exists(mkl_usage_file):
+        with open(mkl_usage_file, 'r') as f:
+            mkl_usage_data = json.load(f)
+    
     # Extract benchmark names and speedups
     benchmarks = []
     speedups = []
     failures = []
+    mkl_calls_counts = []
     
     for result in results:
         benchmark_name = result["benchmark"]
         benchmarks.append(benchmark_name)
+        
+        # Get MKL calls count for this benchmark
+        mkl_calls_count = 0
+        if benchmark_name in mkl_usage_data:
+            mkl_calls_count = mkl_usage_data[benchmark_name].get("num_math_calls", 0)
+        mkl_calls_counts.append(mkl_calls_count)
         
         # Convert string values to appropriate types
         compile_success = result["compile_success"].lower() == 'true'
@@ -77,10 +92,10 @@ def create_speedup_barplot(csv_file, output_dir=None):
                    bbox=dict(facecolor='white', edgecolor='red', alpha=1.0, 
                             boxstyle="round,pad=0.3"))
     
-    # Add speedup values on top of each bar
-    for i, (bar, speedup) in enumerate(zip(bars, speedups)):
+    # Add speedup values and MKL call counts on top of each bar
+    for i, (bar, speedup, mkl_count) in enumerate(zip(bars, speedups, mkl_calls_counts)):
         if not np.isnan(speedup):  # Only add text for valid speedups
-            # Position text just above the bar
+            # Position speedup text just above the bar
             height = bar.get_height()
             ax.text(
                 bar.get_x() + bar.get_width() / 2.,
@@ -92,6 +107,19 @@ def create_speedup_barplot(csv_file, output_dir=None):
                 fontweight='bold',
                 bbox=dict(facecolor='white', alpha=0.7, boxstyle="round,pad=0.1")
             )
+            
+            # Add MKL call count in red above the speedup text
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.,
+                height * 1.25,  # Position above the speedup text
+                f'{mkl_count}',
+                ha='center',
+                va='bottom',
+                fontsize=9,
+                color='red',
+                fontweight='bold',
+                bbox=dict(facecolor='white', alpha=0.7, boxstyle="round,pad=0.1")
+            )
     
     # Another horizontal line at y=1
     ax.axhline(y=1, color='black', linestyle='--')
@@ -99,7 +127,7 @@ def create_speedup_barplot(csv_file, output_dir=None):
     # Customize the plot
     ax.set_xlabel('Benchmarks')
     ax.set_ylabel('Speedup')
-    ax.set_title('Kernel with MKL Library Calls vs. Naive Implementation (X marks indicate failures)')
+    ax.set_title('Kernel with MKL Library Calls vs. Naive Implementation\n(X marks indicate failures, red numbers show number of MKL math calls)')
     ax.set_xticklabels(benchmarks, rotation=45, ha='right')
     
     # Make sure the X labels fit properly
@@ -117,8 +145,6 @@ def create_speedup_barplot(csv_file, output_dir=None):
     plt.close()
 
 if __name__ == "__main__":
-
-    
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Generate speedup barplot from benchmark results')
     parser.add_argument('csv_file', help='Path to the CSV file containing benchmark results')
