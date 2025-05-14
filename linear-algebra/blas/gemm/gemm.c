@@ -30,8 +30,10 @@ void init_array(int ni, int nj, int nk,
 		DATA_TYPE *beta,
 		DATA_TYPE POLYBENCH_2D(C,NI,NJ,ni,nj),
 		DATA_TYPE POLYBENCH_2D(A,NI,NK,ni,nk),
-		DATA_TYPE POLYBENCH_2D(B,NK,NJ,nk,nj),
-    DATA_TYPE POLYBENCH_2D(C_mkl,NI,NJ,ni,nj))
+		DATA_TYPE POLYBENCH_2D(B,NK,NJ,nk,nj),    
+    DATA_TYPE POLYBENCH_2D(C_mkl,NI,NJ,ni,nj),
+    DATA_TYPE POLYBENCH_2D(C_tiled,NI,NJ,ni,nj),
+    DATA_TYPE POLYBENCH_2D(C_tiled_orig,NI,NJ,ni,nj))
 {
   int i, j;
 
@@ -47,8 +49,11 @@ void init_array(int ni, int nj, int nk,
     for (j = 0; j < nj; j++)
       B[i][j] = (DATA_TYPE) (i*(j+2) % nj) / nj;
   for (i = 0; i < ni; i++)
-    for (j = 0; j < nj; j++)
+    for (j = 0; j < nj; j++) {
       C_mkl[i][j] = C[i][j];
+      C_tiled[i][j] = C[i][j];
+      C_tiled_orig[i][j] = C[i][j];
+    }
 }
 
 
@@ -104,6 +109,48 @@ void kernel_gemm(int ni, int nj, int nk,
 
 }
 
+/* Tiled GEMM kernel implementation */
+static
+void kernel_gemm_tiled(int ni, int nj, int nk,
+                      DATA_TYPE alpha,
+                      DATA_TYPE beta,
+                      DATA_TYPE POLYBENCH_2D(C,NI,NJ,ni,nj),
+                      DATA_TYPE POLYBENCH_2D(A,NI,NK,ni,nk),
+                      DATA_TYPE POLYBENCH_2D(B,NK,NJ,nk,nj),
+                      int ti, int tj, int tk)
+{
+  int i, j, k, ii, jj, kk;
+
+  /* Apply beta to C matrix */
+  for (i = 0; i < _PB_NI; i++) {
+    for (j = 0; j < _PB_NJ; j++) {
+      C[i][j] *= beta;
+    }
+  }
+
+  /* Tiled matrix multiplication with alpha */
+  for (i = 0; i < _PB_NI; i += ti) {
+    for (j = 0; j < _PB_NJ; j += tj) {
+      for (k = 0; k < _PB_NK; k += tk) {
+        /* Tile bounds with min to handle edge cases */
+        int i_bound = (i + ti < _PB_NI) ? i + ti : _PB_NI;
+        int j_bound = (j + tj < _PB_NJ) ? j + tj : _PB_NJ;
+        int k_bound = (k + tk < _PB_NK) ? k + tk : _PB_NK;
+
+        /* Compute on tiles */
+        for (ii = i; ii < i_bound; ii++) {
+          for (kk = k; kk < k_bound; kk++) {
+            DATA_TYPE a_val = alpha * A[ii][kk];
+            for (jj = j; jj < j_bound; jj++) {
+              C[ii][jj] += a_val * B[kk][jj];
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 /* Intel MKL optimized GEMM kernel */
 static
 void kernel_gemm_mkl(int ni, int nj, int nk,
@@ -146,8 +193,8 @@ void kernel_gemm_mkl(int ni, int nj, int nk,
 /* Function to verify the correctness of the MKL implementation */
 static
 int verify_results(int ni, int nj,
-                 DATA_TYPE POLYBENCH_2D(C_naive,NI,NJ,ni,nj),
-                 DATA_TYPE POLYBENCH_2D(C_mkl,NI,NJ,ni,nj))
+                 DATA_TYPE POLYBENCH_2D(C_reference,NI,NJ,ni,nj),
+                 DATA_TYPE POLYBENCH_2D(C_test,NI,NJ,ni,nj))
 {
     int i, j;
     DATA_TYPE diff;
@@ -156,20 +203,20 @@ int verify_results(int ni, int nj,
     
     for (i = 0; i < ni; i++) {
         for (j = 0; j < nj; j++) {
-            diff = fabs(C_naive[i][j] - C_mkl[i][j]);
+            diff = fabs(C_reference[i][j] - C_test[i][j]);
             if (diff > max_diff) {
                 max_diff = diff;
             }
         }
     }
     
-    printf("Maximum difference between naive and MKL implementation: %e\n", max_diff);
+    // printf("Maximum difference: %e\n", max_diff);
     
     if (max_diff < threshold) {
-        printf("Verification PASSED: Results match within threshold\n");
+        // printf("Verification PASSED: Results match within threshold\n");
         return 1; /* Success */
     } else {
-        printf("Verification FAILED: Results differ beyond threshold\n");
+        // printf("Verification FAILED: Results differ beyond threshold\n");
         return 0; /* Failure */
     }
 }
@@ -193,21 +240,141 @@ double time_kernel(void (*kernel)(int, int, int, DATA_TYPE, DATA_TYPE,
                   DATA_TYPE POLYBENCH_2D(A,NI,NK,ni,nk),
                   DATA_TYPE POLYBENCH_2D(B,NK,NJ,nk,nj))
 {
+    const int NUM_RUNS = 3;  /* Number of runs for more stable timing */
+    double total_time = 0.0;
     double start_time, end_time;
+    int run;
     
-    /* Flush cache before timing */
-    polybench_flush_cache();
+    for (run = 0; run < NUM_RUNS; run++) {
+        /* Flush cache before timing */
+        polybench_flush_cache();
+        
+        /* Start timer */
+        start_time = get_time();
+        
+        /* Run kernel */
+        kernel(ni, nj, nk, alpha, beta, C, A, B);
+        
+        /* End timer */
+        end_time = get_time();
+        
+        total_time += (end_time - start_time);
+    }
     
-    /* Start timer */
-    start_time = get_time();
+    return total_time / NUM_RUNS;  /* Return average time */
+}
+
+/* Function to time the tiled GEMM kernel */
+static
+double time_tiled_kernel(int ni, int nj, int nk,
+                       DATA_TYPE alpha, DATA_TYPE beta,
+                       DATA_TYPE POLYBENCH_2D(C,NI,NJ,ni,nj),
+                       DATA_TYPE POLYBENCH_2D(A,NI,NK,ni,nk),
+                       DATA_TYPE POLYBENCH_2D(B,NK,NJ,nk,nj),
+                       int ti, int tj, int tk)
+{
+    const int NUM_RUNS = 3;  /* Number of runs for more stable timing */
+    double total_time = 0.0;
+    double start_time, end_time;
+    int run;
     
-    /* Run kernel */
-    kernel(ni, nj, nk, alpha, beta, C, A, B);
+    for (run = 0; run < NUM_RUNS; run++) {
+        /* Flush cache before timing */
+        polybench_flush_cache();
+        
+        /* Start timer */
+        start_time = get_time();
+        
+        /* Run tiled kernel */
+        kernel_gemm_tiled(ni, nj, nk, alpha, beta, C, A, B, ti, tj, tk);
+        
+        /* End timer */
+        end_time = get_time();
+        
+        total_time += (end_time - start_time);
+    }
     
-    /* End timer */
-    end_time = get_time();
+    return total_time / NUM_RUNS;  /* Return average time */
+}
+
+/* Function to perform exhaustive search over tile sizes */
+static
+void tile_size_search(int ni, int nj, int nk,
+                     DATA_TYPE alpha, DATA_TYPE beta,
+                     DATA_TYPE POLYBENCH_2D(C_ref,NI,NJ,ni,nj),
+                     DATA_TYPE POLYBENCH_2D(C_tiled,NI,NJ,ni,nj),
+                     DATA_TYPE POLYBENCH_2D(C_tiled_orig,NI,NJ,ni,nj),
+                     DATA_TYPE POLYBENCH_2D(A,NI,NK,ni,nk),
+                     DATA_TYPE POLYBENCH_2D(B,NK,NJ,nk,nj))
+{
+ 
+    /* Search space for tile sizes */
+    int tile_sizes[] = {4, 8, 16, 32, 64, 128, 256};
+    int num_tile_sizes = sizeof(tile_sizes) / sizeof(tile_sizes[0]);
     
-    return end_time - start_time;
+    /* Best configuration found so far */
+    int best_ti = 0, best_tj = 0, best_tk = 0;
+    double best_time = 1e10;  /* Initialize to a large value */
+    
+    printf("\n=== Exhaustive Search for Optimal Tile Sizes ===\n");
+    printf("Tile size combinations to explore: %d\n", num_tile_sizes * num_tile_sizes * num_tile_sizes);
+    printf("%-6s %-6s %-6s %-12s %-10s\n", "Ti", "Tj", "Tk", "Time (sec)", "Verified");
+    
+    /* Exhaustive search over all tile size combinations */
+    int ti_idx, tj_idx, tk_idx;
+    for (ti_idx = 0; ti_idx < num_tile_sizes; ti_idx++) {
+        int ti = tile_sizes[ti_idx];
+        for (tj_idx = 0; tj_idx < num_tile_sizes; tj_idx++) {
+            int tj = tile_sizes[tj_idx];
+            for (tk_idx = 0; tk_idx < num_tile_sizes; tk_idx++) {
+                int tk = tile_sizes[tk_idx];
+                
+                /* Reset C_tiled to original values */
+                int i, j;
+                for (i = 0; i < ni; i++) {
+                    for (j = 0; j < nj; j++) {
+                        C_tiled[i][j] = C_tiled_orig[i][j];
+                    }
+                }
+                
+                /* Time the tiled kernel with current tile sizes */
+                double time = time_tiled_kernel(ni, nj, nk, alpha, beta, C_tiled, A, B, ti, tj, tk);
+                
+                /* Verify the result */
+                int verified = verify_results(ni, nj, C_ref, C_tiled);
+                
+                /* Print current configuration and timing */
+                printf("%-6d %-6d %-6d %-12.6f %-10s\n", ti, tj, tk, time, verified ? "Pass" : "Fail");
+                
+                /* Update best configuration if this one is better */
+                if (verified && time < best_time) {
+                    best_time = time;
+                    best_ti = ti;
+                    best_tj = tj;
+                    best_tk = tk;
+                }
+            }
+        }
+    }
+    
+    /* Report best tile sizes found */
+    printf("\n=== Best Tile Configuration Found ===\n");
+    printf("Best tile sizes: Ti=%d, Tj=%d, Tk=%d\n", best_ti, best_tj, best_tk);
+    printf("Best time: %0.6f seconds\n", best_time);
+    
+    /* Use the best configuration for final timing */
+    // reset C_tiled to original values
+    for (int i = 0; i < ni; i++) {
+        for (int j = 0; j < nj; j++) {
+            C_tiled[i][j] = C_tiled_orig[i][j];
+        }
+    }
+    
+    /* Time the best configuration one more time */
+    double final_time = time_tiled_kernel(ni, nj, nk, alpha, beta, C_tiled, A, B, best_ti, best_tj, best_tk);
+    printf("Final verification of best configuration: %s\n", 
+          verify_results(ni, nj, C_ref, C_tiled) ? "Passed" : "Failed");
+    printf("Confirmed time with best configuration: %0.6f seconds\n", final_time);
 }
 
 int main(int argc, char** argv)
@@ -226,21 +393,18 @@ int main(int argc, char** argv)
   
   /* For correctness verification */
   POLYBENCH_2D_ARRAY_DECL(C_mkl,DATA_TYPE,NI,NJ,ni,nj);
-
+  
+  /* For tiled implementation */
+  POLYBENCH_2D_ARRAY_DECL(C_tiled,DATA_TYPE,NI,NJ,ni,nj);
+  POLYBENCH_2D_ARRAY_DECL(C_tiled_orig,DATA_TYPE,NI,NJ,ni,nj); // used for resetting C_tiled to original values
   /* Initialize array(s). */
   init_array (ni, nj, nk, &alpha, &beta,
 	      POLYBENCH_ARRAY(C),
 	      POLYBENCH_ARRAY(A),
 	      POLYBENCH_ARRAY(B),
-	      POLYBENCH_ARRAY(C_mkl));
-  
-  // /* Make a copy of C for MKL implementation */
-  // int i, j;
-  // for (i = 0; i < ni; i++) {
-  //   for (j = 0; j < nj; j++) {
-  //     C_mkl[i][j] = C[i][j];
-  //   }
-  // }
+	      POLYBENCH_ARRAY(C_mkl),
+	      POLYBENCH_ARRAY(C_tiled),
+	      POLYBENCH_ARRAY(C_tiled_orig));
 
   /* Start timer for naive implementation. */
   double naive_time = time_kernel(kernel_gemm, ni, nj, nk, alpha, beta,
@@ -248,6 +412,7 @@ int main(int argc, char** argv)
                                 POLYBENCH_ARRAY(A),
                                 POLYBENCH_ARRAY(B));
   
+  printf("\n=== Performance Results ===\n");
   printf("Naive GEMM Time: %0.6f seconds\n", naive_time);
 
   /* Time MKL implementation */
@@ -257,10 +422,21 @@ int main(int argc, char** argv)
                               POLYBENCH_ARRAY(B));
   
   printf("MKL GEMM Time: %0.6f seconds\n", mkl_time);
-  printf("Speedup: %0.2f\n", naive_time / mkl_time);
+  printf("MKL Speedup vs Naive: %0.2f\n", naive_time / mkl_time);
 
   /* Verify the correctness of MKL implementation */
-  verify_results(ni, nj, POLYBENCH_ARRAY(C), POLYBENCH_ARRAY(C_mkl));
+  printf("\n=== MKL Verification ===\n");
+  int mkl_verification = verify_results(ni, nj, POLYBENCH_ARRAY(C), POLYBENCH_ARRAY(C_mkl));
+  printf("MKL Verification: %s\n", mkl_verification ? "Passed" : "Failed");
+  
+  /* Run exhaustive search for optimal tile sizes */
+  printf("\n=== Starting Tile Size Search ===\n");
+  tile_size_search(ni, nj, nk, alpha, beta, 
+                  POLYBENCH_ARRAY(C), 
+                  POLYBENCH_ARRAY(C_tiled),
+                  POLYBENCH_ARRAY(C_tiled_orig),
+                  POLYBENCH_ARRAY(A),
+                  POLYBENCH_ARRAY(B));
 
   /* Prevent dead-code elimination. All live-out data must be printed
      by the function call in argument. */
@@ -269,6 +445,7 @@ int main(int argc, char** argv)
   /* Be clean. */
   POLYBENCH_FREE_ARRAY(C);
   POLYBENCH_FREE_ARRAY(C_mkl);
+  POLYBENCH_FREE_ARRAY(C_tiled);
   POLYBENCH_FREE_ARRAY(A);
   POLYBENCH_FREE_ARRAY(B);
 
