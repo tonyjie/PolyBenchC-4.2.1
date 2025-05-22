@@ -6,3 +6,9 @@
 
 # result directory
 results/
+
+# pluto files
+*.cloog
+
+# vscode
+.vscode/

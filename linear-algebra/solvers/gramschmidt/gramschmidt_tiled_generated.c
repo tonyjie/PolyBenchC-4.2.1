@@ -1,3 +1,9 @@
+#include <math.h>
+#define ceild(n,d)  (((n)<0) ? -((-(n))/(d)) : ((n)+(d)-1)/(d))
+#define floord(n,d) (((n)<0) ? -((-(n)+(d)-1)/(d)) : (n)/(d))
+#define max(x,y)    ((x) > (y)? (x) : (y))
+#define min(x,y)    ((x) < (y)? (x) : (y))
+
 /**
  * This version is stamped on May 10, 2016
  *
@@ -87,25 +93,97 @@ void kernel_gramschmidt(int m, int n,
 
   DATA_TYPE nrm;
 
-#pragma scop
-  for (k = 0; k < _PB_N; k++)
-    {
-      nrm = SCALAR_VAL(0.0);
-      for (i = 0; i < _PB_M; i++)
-        nrm += A[i][k] * A[i][k];
-      R[k][k] = SQRT_FUN(nrm);
-      for (i = 0; i < _PB_M; i++)
-        Q[i][k] = A[i][k] / R[k][k];
-      for (j = k + 1; j < _PB_N; j++)
-	{
-	  R[k][j] = SCALAR_VAL(0.0);
-	  for (i = 0; i < _PB_M; i++)
-	    R[k][j] += Q[i][k] * A[i][j];
-	  for (i = 0; i < _PB_M; i++)
-	    A[i][j] = A[i][j] - Q[i][k] * R[k][j];
-	}
+  int t1, t2, t3, t4, t5, t6, t7, t8, t9;
+ register int lbv, ubv;
+if (_PB_N >= 1) {
+  for (t2=0;t2<=floord(_PB_N-2,32);t2++) {
+    for (t4=t2;t4<=floord(_PB_N-1,32);t4++) {
+      for (t5=32*t2;t5<=min(min(_PB_N-2,32*t2+31),32*t4+30);t5++) {
+        lbv=max(32*t4,t5+1);
+        ubv=min(_PB_N-1,32*t4+31);
+#pragma ivdep
+#pragma vector always
+        for (t7=lbv;t7<=ubv;t7++) {
+          R[t5][t7] = SCALAR_VAL(0.0);;
+        }
+      }
     }
-#pragma endscop
+  }
+  for (t2=0;t2<=_PB_N-1;t2++) {
+    nrm = SCALAR_VAL(0.0);;
+    for (t4=0;t4<=_PB_M-1;t4++) {
+      nrm += A[t4][t2] * A[t4][t2];;
+    }
+    R[t2][t2] = SQRT_FUN(nrm);;
+    for (t4=0;t4<=floord(_PB_M-1,32);t4++) {
+      lbv=32*t4;
+      ubv=min(_PB_M-1,32*t4+31);
+#pragma ivdep
+#pragma vector always
+      for (t5=lbv;t5<=ubv;t5++) {
+        Q[t5][t2] = A[t5][t2] / R[t2][t2];;
+      }
+    }
+    if ((_PB_M >= 1) && (t2 <= _PB_N-2)) {
+      for (t4=ceild(t2-30,32);t4<=floord(_PB_N-1,32);t4++) {
+        for (t6=0;t6<=floord(_PB_M-1,32);t6++) {
+          for (t8=32*t6;t8<=(min(_PB_M-1,32*t6+31))-7;t8+=8) {
+            lbv=max(32*t4,t2+1);
+            ubv=min(_PB_N-1,32*t4+31);
+#pragma ivdep
+#pragma vector always
+            for (t9=lbv;t9<=ubv;t9++) {
+              R[t2][t9] += Q[t8][t2] * A[t8][t9];;
+              R[t2][t9] += Q[(t8+1)][t2] * A[(t8+1)][t9];;
+              R[t2][t9] += Q[(t8+2)][t2] * A[(t8+2)][t9];;
+              R[t2][t9] += Q[(t8+3)][t2] * A[(t8+3)][t9];;
+              R[t2][t9] += Q[(t8+4)][t2] * A[(t8+4)][t9];;
+              R[t2][t9] += Q[(t8+5)][t2] * A[(t8+5)][t9];;
+              R[t2][t9] += Q[(t8+6)][t2] * A[(t8+6)][t9];;
+              R[t2][t9] += Q[(t8+7)][t2] * A[(t8+7)][t9];;
+            }
+          }
+          for (;t8<=min(_PB_M-1,32*t6+31);t8++) {
+            lbv=max(32*t4,t2+1);
+            ubv=min(_PB_N-1,32*t4+31);
+#pragma ivdep
+#pragma vector always
+            for (t9=lbv;t9<=ubv;t9++) {
+              R[t2][t9] += Q[t8][t2] * A[t8][t9];;
+            }
+          }
+        }
+        for (t6=0;t6<=floord(_PB_M-1,32);t6++) {
+          for (t8=32*t6;t8<=(min(_PB_M-1,32*t6+31))-7;t8+=8) {
+            lbv=max(32*t4,t2+1);
+            ubv=min(_PB_N-1,32*t4+31);
+#pragma ivdep
+#pragma vector always
+            for (t9=lbv;t9<=ubv;t9++) {
+              A[t8][t9] = A[t8][t9] - Q[t8][t2] * R[t2][t9];;
+              A[(t8+1)][t9] = A[(t8+1)][t9] - Q[(t8+1)][t2] * R[t2][t9];;
+              A[(t8+2)][t9] = A[(t8+2)][t9] - Q[(t8+2)][t2] * R[t2][t9];;
+              A[(t8+3)][t9] = A[(t8+3)][t9] - Q[(t8+3)][t2] * R[t2][t9];;
+              A[(t8+4)][t9] = A[(t8+4)][t9] - Q[(t8+4)][t2] * R[t2][t9];;
+              A[(t8+5)][t9] = A[(t8+5)][t9] - Q[(t8+5)][t2] * R[t2][t9];;
+              A[(t8+6)][t9] = A[(t8+6)][t9] - Q[(t8+6)][t2] * R[t2][t9];;
+              A[(t8+7)][t9] = A[(t8+7)][t9] - Q[(t8+7)][t2] * R[t2][t9];;
+            }
+          }
+          for (;t8<=min(_PB_M-1,32*t6+31);t8++) {
+            lbv=max(32*t4,t2+1);
+            ubv=min(_PB_N-1,32*t4+31);
+#pragma ivdep
+#pragma vector always
+            for (t9=lbv;t9<=ubv;t9++) {
+              A[t8][t9] = A[t8][t9] - Q[t8][t2] * R[t2][t9];;
+            }
+          }
+        }
+      }
+    }
+  }
+}
 
 }
 
