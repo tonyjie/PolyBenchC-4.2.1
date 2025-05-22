@@ -6,3 +6,8 @@
 
 # result directory
 results/
+
+# intermediate files by Pluto
+*.cloog
+
+.vscode/

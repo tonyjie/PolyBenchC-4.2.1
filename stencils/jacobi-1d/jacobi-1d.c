@@ -15,6 +15,7 @@
 #include <math.h>
 #include <time.h>
 #include <mkl.h>
+// #include <mkl.h>
 
 /* Include polybench common header. */
 #include <polybench.h>
@@ -23,13 +24,17 @@
 #include "jacobi-1d.h"
 
 
+/* Helper macros */
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
 /* Array initialization. */
 static
 void init_array (int n,
 		 DATA_TYPE POLYBENCH_1D(A,N,n),
 		 DATA_TYPE POLYBENCH_1D(B,N,n),
-		 DATA_TYPE POLYBENCH_1D(A_mkl,N,n),
-		 DATA_TYPE POLYBENCH_1D(B_mkl,N,n))
+     DATA_TYPE POLYBENCH_1D(A_opt,N,n),
+     DATA_TYPE POLYBENCH_1D(B_opt,N,n))
 {
   int i;
 
@@ -37,8 +42,8 @@ void init_array (int n,
       {
 	A[i] = ((DATA_TYPE) i+ 2) / n;
 	B[i] = ((DATA_TYPE) i+ 3) / n;
-	A_mkl[i] = A[i];
-	B_mkl[i] = B[i];
+  A_opt[i] = A[i];
+  B_opt[i] = B[i];
       }
 }
 
@@ -64,6 +69,75 @@ void print_array(int n,
 }
 
 
+// Optimized kernel with temporal and spatial tiling
+static void kernel_jacobi_1d_optimized(int tsteps, int n,
+                                    DATA_TYPE POLYBENCH_1D(A,N,n),
+                                    DATA_TYPE POLYBENCH_1D(B,N,n))
+{
+  int t, i, tt, ii;
+  const int time_tile_size = 8;  // Time tile size
+  const int space_tile_size = 256;  // Space tile size, tune for your L1 cache
+  
+  // Temporal and spatial tiling
+  #pragma omp parallel for private(tt, t, ii, i)
+  for (tt = 0; tt < tsteps; tt += time_tile_size) {
+    for (ii = 1; ii < n-1; ii += space_tile_size) {
+      int end_t = MIN(tt + time_tile_size, tsteps);
+      int end_i = MIN(ii + space_tile_size, n-1);
+      
+      for (t = tt; t < end_t; t++) {
+        // SIMD vectorization of inner loop
+        #pragma omp simd
+        for (i = MAX(1, ii); i < end_i; i++) {
+          if (t % 2 == 0)
+            B[i] = 0.33333 * (A[i-1] + A[i] + A[i+1]);
+          else
+            A[i] = 0.33333 * (B[i-1] + B[i] + B[i+1]);
+        }
+      }
+    }
+  }
+}
+
+
+void kernel_jacobi_1d_mkl(int tsteps, int n, 
+                         DATA_TYPE POLYBENCH_1D(A,N,n),
+                         DATA_TYPE POLYBENCH_1D(B,N,n)) {
+    DATA_TYPE *temp = (DATA_TYPE *)malloc(n * sizeof(DATA_TYPE));
+
+    for (int t = 0; t < tsteps; t++) {
+        // Step 1: B = A[i-1] + A[i] + A[i+1] → shifted adds using daxpy
+        // Initialize temp to 0
+        cblas_dscal(n, 0.0, temp, 1);
+
+        // Add A[i-1]
+        cblas_daxpy(n - 2, 1.0, A, 1, temp + 1, 1);
+
+        // Add A[i]
+        cblas_daxpy(n - 2, 1.0, A + 1, 1, temp + 1, 1);
+
+        // Add A[i+1]
+        cblas_daxpy(n - 2, 1.0, A + 2, 1, temp + 1, 1);
+
+        // Scale: B = 0.33333 * sum
+        for (int i = 1; i < n - 1; i++) {
+            B[i] = 0.33333 * temp[i];
+        }
+
+        // Repeat for A = f(B)
+        cblas_dscal(n, 0.0, temp, 1);
+        cblas_daxpy(n - 2, 1.0, B, 1, temp + 1, 1);
+        cblas_daxpy(n - 2, 1.0, B + 1, 1, temp + 1, 1);
+        cblas_daxpy(n - 2, 1.0, B + 2, 1, temp + 1, 1);
+        for (int i = 1; i < n - 1; i++) {
+            A[i] = 0.33333 * temp[i];
+        }
+    }
+
+    free(temp);
+}
+
+
 /* Main computational kernel. The whole function will be timed,
    including the call and return. */
 static
@@ -86,70 +160,12 @@ void kernel_jacobi_1d(int tsteps,
 
 }
 
-/* MKL optimized implementation of Jacobi-1D kernel */
-static
-void kernel_jacobi_1d_mkl(int tsteps,
-                        int n,
-                        DATA_TYPE POLYBENCH_1D(A,N,n),
-                        DATA_TYPE POLYBENCH_1D(B,N,n))
-{
-  int t, i;
-  
-  /* Constant for stencil computation */
-  DATA_TYPE coeff = 0.33333;
-  
-  /* Allocate MKL memory-aligned temporary arrays */
-  DATA_TYPE* tmp_A = (DATA_TYPE*)mkl_malloc((n-2) * sizeof(DATA_TYPE), 64);
-  DATA_TYPE* tmp_B = (DATA_TYPE*)mkl_malloc((n-2) * sizeof(DATA_TYPE), 64);
-  
-  for (t = 0; t < tsteps; t++) {
-    /* First sweep: B = stencil(A) */
-    #ifdef DATA_TYPE_IS_DOUBLE
-    /* Direct vector implementation using MKL VM */
-    for (i = 1; i < n - 1; i++) {
-      B[i] = coeff * (A[i-1] + A[i] + A[i+1]);
-    }
-    #elif defined(DATA_TYPE_IS_FLOAT)
-    /* Single precision implementation */
-    for (i = 1; i < n - 1; i++) {
-      B[i] = coeff * (A[i-1] + A[i] + A[i+1]);
-    }
-    #else
-    /* Integer implementation */
-    for (i = 1; i < n - 1; i++) {
-      B[i] = coeff * (A[i-1] + A[i] + A[i+1]);
-    }
-    #endif
-    
-    /* Second sweep: A = stencil(B) */
-    #ifdef DATA_TYPE_IS_DOUBLE
-    /* Direct vector implementation using MKL VM */
-    for (i = 1; i < n - 1; i++) {
-      A[i] = coeff * (B[i-1] + B[i] + B[i+1]);
-    }
-    #elif defined(DATA_TYPE_IS_FLOAT)
-    /* Single precision implementation */
-    for (i = 1; i < n - 1; i++) {
-      A[i] = coeff * (B[i-1] + B[i] + B[i+1]);
-    }
-    #else
-    /* Integer implementation */
-    for (i = 1; i < n - 1; i++) {
-      A[i] = coeff * (B[i-1] + B[i] + B[i+1]);
-    }
-    #endif
-  }
-  
-  /* Free allocated memory */
-  mkl_free(tmp_A);
-  mkl_free(tmp_B);
-}
 
 /* Function to verify the correctness of the MKL implementation */
 static
 int verify_results(int n,
-                 DATA_TYPE POLYBENCH_1D(A_naive,N,n),
-                 DATA_TYPE POLYBENCH_1D(A_mkl,N,n))
+                 DATA_TYPE POLYBENCH_1D(A_ref,N,n),
+                 DATA_TYPE POLYBENCH_1D(A_test,N,n))
 {
     int i;
     DATA_TYPE diff;
@@ -157,13 +173,13 @@ int verify_results(int n,
     DATA_TYPE threshold = 1e-4;
     
     for (i = 0; i < n; i++) {
-        diff = fabs(A_naive[i] - A_mkl[i]);
+        diff = fabs(A_ref[i] - A_test[i]);
         if (diff > max_diff) {
             max_diff = diff;
         }
     }
     
-    printf("Maximum difference between naive and MKL implementation: %e\n", max_diff);
+    printf("Maximum difference: %e\n", max_diff);
     
     if (max_diff < threshold) {
         printf("Verification PASSED: Results match within threshold\n");
@@ -191,20 +207,27 @@ double time_kernel(void (*kernel)(int, int,
                   DATA_TYPE POLYBENCH_1D(B,N,n))
 {
     double start_time, end_time;
+    double total_time = 0.0;
+    int runs = 50;
     
-    /* Flush cache before timing */
-    polybench_flush_cache();
+    for (int run = 0; run < runs; run++) {
+        /* Flush cache before timing */
+        polybench_flush_cache();
+        
+        /* Start timer */
+        start_time = get_time();
+        
+        /* Run kernel */
+        kernel(tsteps, n, A, B);
+        
+        /* End timer */
+        end_time = get_time();
+        
+        total_time += (end_time - start_time);
+    }
     
-    /* Start timer */
-    start_time = get_time();
-    
-    /* Run kernel */
-    kernel(tsteps, n, A, B);
-    
-    /* End timer */
-    end_time = get_time();
-    
-    return end_time - start_time;
+    /* Return average time */
+    return total_time / runs;
 }
 
 int main(int argc, char** argv)
@@ -216,31 +239,46 @@ int main(int argc, char** argv)
   /* Variable declaration/allocation. */
   POLYBENCH_1D_ARRAY_DECL(A, DATA_TYPE, N, n);
   POLYBENCH_1D_ARRAY_DECL(B, DATA_TYPE, N, n);
-  
-  /* For MKL implementation */
+  POLYBENCH_1D_ARRAY_DECL(A_opt, DATA_TYPE, N, n);
+  POLYBENCH_1D_ARRAY_DECL(B_opt, DATA_TYPE, N, n);
   POLYBENCH_1D_ARRAY_DECL(A_mkl, DATA_TYPE, N, n);
   POLYBENCH_1D_ARRAY_DECL(B_mkl, DATA_TYPE, N, n);
-
+  
   /* Initialize array(s). */
-  init_array(n, POLYBENCH_ARRAY(A), POLYBENCH_ARRAY(B),
-             POLYBENCH_ARRAY(A_mkl), POLYBENCH_ARRAY(B_mkl));
-
+  init_array(n, POLYBENCH_ARRAY(A), POLYBENCH_ARRAY(B), POLYBENCH_ARRAY(A_opt), POLYBENCH_ARRAY(B_opt));
+  
+  /* Copy arrays for MKL version */
+  memcpy(POLYBENCH_ARRAY(A_mkl), POLYBENCH_ARRAY(A), n * sizeof(DATA_TYPE));
+  memcpy(POLYBENCH_ARRAY(B_mkl), POLYBENCH_ARRAY(B), n * sizeof(DATA_TYPE));
+  
   /* Start timer for naive implementation. */
   double naive_time = time_kernel(kernel_jacobi_1d, tsteps, n,
                                 POLYBENCH_ARRAY(A),
                                 POLYBENCH_ARRAY(B));
   
-  printf("Naive Jacobi-1D Time: %0.6f seconds\n", naive_time);
-
-  /* Time MKL implementation */
+  printf("Naive implementation time: %0.6f seconds\n", naive_time);
+  
+  /* Start timer for optimized implementation. */
+  double optimized_time = time_kernel(kernel_jacobi_1d_optimized, tsteps, n,
+                                    POLYBENCH_ARRAY(A_opt),
+                                    POLYBENCH_ARRAY(B_opt));
+  
+  printf("Optimized implementation time: %0.6f seconds\n", optimized_time);
+  printf("Speedup (optimized vs naive): %.2fx\n", naive_time / optimized_time);
+  
+  /* Start timer for MKL implementation */
   double mkl_time = time_kernel(kernel_jacobi_1d_mkl, tsteps, n,
                               POLYBENCH_ARRAY(A_mkl),
                               POLYBENCH_ARRAY(B_mkl));
   
-  printf("MKL Jacobi-1D Time: %0.6f seconds\n", mkl_time);
-  printf("Speedup: %0.2f\n", naive_time / mkl_time);
-
-  /* Verify the correctness of MKL implementation */
+  printf("MKL implementation time: %0.6f seconds\n", mkl_time);
+  printf("Speedup (MKL vs naive): %.2fx\n", naive_time / mkl_time);
+  
+  /* Verify the correctness of implementations */
+  printf("\nVerifying results:\n");
+  printf("Optimized vs Naive: ");
+  verify_results(n, POLYBENCH_ARRAY(A), POLYBENCH_ARRAY(A_opt));
+  printf("MKL vs Naive: ");
   verify_results(n, POLYBENCH_ARRAY(A), POLYBENCH_ARRAY(A_mkl));
 
   /* Prevent dead-code elimination. All live-out data must be printed
@@ -250,6 +288,8 @@ int main(int argc, char** argv)
   /* Be clean. */
   POLYBENCH_FREE_ARRAY(A);
   POLYBENCH_FREE_ARRAY(B);
+  POLYBENCH_FREE_ARRAY(A_opt);
+  POLYBENCH_FREE_ARRAY(B_opt);
   POLYBENCH_FREE_ARRAY(A_mkl);
   POLYBENCH_FREE_ARRAY(B_mkl);
 
